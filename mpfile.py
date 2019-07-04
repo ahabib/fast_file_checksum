@@ -5,7 +5,7 @@ import hashlib
 import threading
 import queue
 import concurrent.futures
-import time
+import argparse
 
 
 def split_file(filename, file_chunk_size):
@@ -33,20 +33,20 @@ def read_chunk(filename, start_chunk):
         file.seek(start_chunk)
         data = file.read(CHUNK_SIZE)
         if logging.getLogger().level == logging.DEBUG:
-            hash_segment = hashlib.sha256()
+            hash_segment = hashlib.new(args.algo)
             hash_segment.update(data)
             logging.debug("\t\t%s %s %s", hash_segment.hexdigest(), start_chunk, os.path.basename(filename))
         return data
 
 
 def stitch_file(data):
-    file_hash = hashlib.sha256()
+    file_hash = hashlib.new(args.algo)
     for entry in data:
         file_hash.update(entry)
     return file_hash.hexdigest()
 
 
-def process_entry(filename, seek_location):
+def process_entry(filename: str, seek_location: int, sync_access_lock: threading.RLock, file_queue: queue.Queue):
     try:
         chunk = read_chunk(filename, seek_location)
         segment = files[filename]
@@ -76,19 +76,22 @@ def process_entry(filename, seek_location):
             logging.debug("\t\t\t\t\tCalculate hash: %s, segments: %s", os.path.basename(filename), len(stitch_data))
             calculated_hash = stitch_file(stitch_data)
             # logging.info("%s %s", calculated_hash, filename)
-            with sync_access:
+            with sync_access_lock:
                 print(calculated_hash, filename)
             del files[filename]
             del files_data[filename]
         else:
-            with sync_access:
-                logging.debug("\t\tAdding %s segment at %s (%s)", os.path.basename(filename), seek_location, len(chunk))
-                files_data.setdefault(filename, []).append([seek_location, chunk])
+            logging.debug("\t\tAdding %s segment at %s (%s)", os.path.basename(filename), seek_location, len(chunk))
+            files_data.setdefault(filename, []).append([seek_location, chunk])
     finally:
-        sync_queue.task_done()
+        file_queue.task_done()
 
 
-def consume_queue(files_to_be_processed_queue, executor):
+def mark_task_as_done(sync_queue: queue.Queue):
+    sync_queue.task_done()
+
+
+def consume_queue(files_to_be_processed_queue, executor, sync_access):
     logging.debug("BEGIN Qsize is %s", files_to_be_processed_queue.qsize())
     futures = []
     while not files_to_be_processed_queue.empty() or not all_files_fed.is_set():
@@ -96,7 +99,7 @@ def consume_queue(files_to_be_processed_queue, executor):
         logging.debug("Reading queue: %s", entry)
         filename = entry[0]
         seek_location = entry[1]
-        futures.append(executor.submit(process_entry, filename, seek_location))
+        futures.append(executor.submit(process_entry, filename, seek_location, sync_access, files_to_be_processed_queue))
     logging.debug("END Qsize is %s", files_to_be_processed_queue.qsize())
     logging.debug("Waiting for reads to complete...")
     concurrent.futures.wait(futures)
@@ -120,28 +123,41 @@ def create_queue(path, file_queue):
     all_files_fed.set()
 
 
-def main(files_location, read_queue):
+def main(files_location):
+    sync_queue = queue.Queue(QUEUE_SIZE)
+    sync_access = threading.RLock()
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=CORES, thread_name_prefix="mpfile")
-    executor.submit(create_queue, files_location, read_queue)
-    consume_queue(read_queue, executor)
+    executor.submit(create_queue, files_location, sync_queue)
+    consume_queue(sync_queue, executor, sync_access)
+
+
+def parse_args():
+    threads = os.cpu_count()
+    parser = argparse.ArgumentParser(description="Generate fast check sums.")
+    parser.add_argument('-algo', metavar='-a', choices=sorted(hashlib.algorithms_guaranteed), default="sha256",
+                        help="select default hashing algorithm.")
+    parser.add_argument('-threads', metavar='-t', type=int, choices=[threads, threads*2, threads*4, threads*8],
+                        default=threads, help="Number of parallel file reads to perform.")
+    parser.add_argument('-version', metavar='-v', help="Show version number.")
+    parser.add_argument('-path', metavar='-p', help="file or root directory", required=True)
+    return parser.parse_args()
 
 
 if __name__ == '__main__':
+    logging.basicConfig(format='[%(threadName)s] %(asctime)s %(message)s', level=logging.ERROR)
+    args = parse_args()
+    location = args.path
+    logging.debug("Ready for %s", location)
     try:
-        logging.basicConfig(format='[%(threadName)s] %(asctime)s %(message)s', level=logging.ERROR
-                            )
-        CORES = os.cpu_count()
-        QUEUE_SIZE = CORES * 10
-        CHUNK_SIZE = 1024 * 1024 * 10  # 10M
-        files = {}
-        files_data = {}
-        location = sys.argv[1] if len(sys.argv) > 1 and os.path.exists(sys.argv[1]) else None
-        all_files_fed = threading.Event()
-        sync_queue = queue.Queue(QUEUE_SIZE)
-        sync_access = threading.RLock()
-        if location is not None:
-            main(location, sync_queue)
+        if os.path.exists(location):
+            CORES = args.threads
+            QUEUE_SIZE = CORES * 10
+            CHUNK_SIZE = 1024 * 1024 * 10  # 10M
+            files = {}
+            files_data = {}
+            all_files_fed = threading.Event()
+            main(location)
         else:
-            logging.error("Usage: %s /path", os.path.basename(sys.argv[0]))
-    except KeyboardInterrupt:
-        logging.error("User interrupted")
+            raise FileNotFoundError(location)
+    except OSError as fnf:
+        print("Error processing: ", fnf)
