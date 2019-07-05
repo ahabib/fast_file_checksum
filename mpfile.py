@@ -45,7 +45,8 @@ def stitch_file(data):
         file_hash.update(entry)
     return file_hash.hexdigest()
 
-
+# processes each file entry in the queue, i.e. reads the file segment, add its to a file queue and calcualtes the hash
+# after last entry is read.
 def process_entry(filename: str, seek_location: int, sync_access_lock: threading.RLock, file_queue: queue.Queue):
     try:
         chunk = read_chunk(filename, seek_location)
@@ -90,10 +91,7 @@ def process_entry(filename: str, seek_location: int, sync_access_lock: threading
         file_queue.task_done()
 
 
-def mark_task_as_done(sync_queue: queue.Queue):
-    sync_queue.task_done()
-
-
+# consumes the queue by creating various threads.
 def consume_queue(files_to_be_processed_queue, executor, sync_access):
     logging.debug("BEGIN Qsize is %s", files_to_be_processed_queue.qsize())
     futures = []
@@ -110,7 +108,7 @@ def consume_queue(files_to_be_processed_queue, executor, sync_access):
     logging.debug("Processed all files...")
 
 
-# may block if queue is full
+# parse all files amd adds them to a queue. May block if queue is full
 def create_queue(path, file_queue):
     for file in discover_path_gen(path, CHUNK_SIZE):
         logging.debug("Enqueueing file: %s", file)
@@ -127,8 +125,8 @@ def create_queue(path, file_queue):
     all_files_fed.set()
 
 
+# main entry point to start producer and consumer threads
 def main(files_location):
-
     sync_queue = queue.Queue(QUEUE_SIZE)
     sync_access = threading.RLock()
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=CORES, thread_name_prefix="mpfile")
@@ -136,6 +134,7 @@ def main(files_location):
     consume_queue(sync_queue, executor, sync_access)
 
 
+# Parse all arguments with defaults for number of threads and hash algorithm to choose.
 def parse_args():
     cpu_count = os.cpu_count()
     threads = cpu_count if cpu_count > 1 else 2
@@ -152,8 +151,9 @@ def parse_args():
 
 
 if __name__ == '__main__':
+    # set standard error logging format
     logging.basicConfig(format='[%(threadName)s] %(asctime)s %(message)s', level=logging.ERROR)
-    args = parse_args()
+    args = parse_args() # read args passed by user
     file_to_write = args.file
     location = args.path
     logging.debug("Ready with %s", args)
