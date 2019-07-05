@@ -5,6 +5,7 @@ import threading
 import queue
 import concurrent.futures
 import argparse
+import sys
 
 
 def split_file(filename, file_chunk_size):
@@ -76,7 +77,10 @@ def process_entry(filename: str, seek_location: int, sync_access_lock: threading
             calculated_hash = stitch_file(stitch_data)
             # logging.info("%s %s", calculated_hash, filename)
             with sync_access_lock:
-                print(calculated_hash, filename)
+                if file_to_write is not None:
+                    print(calculated_hash, filename, file=file_to_write)
+                else:
+                    print(calculated_hash, filename)
             del files[filename]
             del files_data[filename]
         else:
@@ -102,6 +106,7 @@ def consume_queue(files_to_be_processed_queue, executor, sync_access):
     logging.debug("END Qsize is %s", files_to_be_processed_queue.qsize())
     logging.debug("Waiting for reads to complete...")
     concurrent.futures.wait(futures)
+    # files_to_be_processed_queue.join()
     logging.debug("Processed all files...")
 
 
@@ -123,6 +128,7 @@ def create_queue(path, file_queue):
 
 
 def main(files_location):
+
     sync_queue = queue.Queue(QUEUE_SIZE)
     sync_access = threading.RLock()
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=CORES, thread_name_prefix="mpfile")
@@ -131,7 +137,8 @@ def main(files_location):
 
 
 def parse_args():
-    threads = os.cpu_count()
+    cpu_count = os.cpu_count()
+    threads = cpu_count if cpu_count > 1 else 2
     parser = argparse.ArgumentParser(description="Generate fast check sums.")
     parser.add_argument('-algo', metavar='-a', choices=sorted(hashlib.algorithms_guaranteed), default="sha256",
                         help="select default hashing algorithm.")
@@ -139,14 +146,17 @@ def parse_args():
                         default=threads, help="Number of parallel file reads to perform.")
     parser.add_argument('-version', metavar='-v', help="Show version number.")
     parser.add_argument('-path', metavar='-p', help="file or root directory", required=True)
+    parser.add_argument('-s', action='store_true', help="Suppress config output")
+    parser.add_argument('-file', metavar='-f', help="Store output in a file")
     return parser.parse_args()
 
 
 if __name__ == '__main__':
     logging.basicConfig(format='[%(threadName)s] %(asctime)s %(message)s', level=logging.ERROR)
     args = parse_args()
+    file_to_write = args.file
     location = args.path
-    logging.debug("Ready for %s", location)
+    logging.debug("Ready with %s", args)
     try:
         if os.path.exists(location):
             CORES = args.threads
@@ -155,8 +165,14 @@ if __name__ == '__main__':
             files = {}
             files_data = {}
             all_files_fed = threading.Event()
-            main(location)
+            if args.s is False:
+                print("Using version=1.0, threads:", CORES, ", algorithm=", args.algo)
+            if file_to_write is not None:
+                with open(file_to_write, "w") as file_to_write:
+                    main(location)
+            else:
+                main(location)
         else:
             raise FileNotFoundError(location)
     except OSError as fnf:
-        print("Error processing: ", fnf)
+        print("Error processing: ", fnf, file=sys.stderr)
